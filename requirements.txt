@@ -1,0 +1,8 @@
+requests
+pandas
+geopandas
+shapely
+fastkml
+lxml
+openpyxl
+matplotlib

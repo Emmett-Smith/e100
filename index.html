@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flight Path Parcel Locator</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            height: 100vh;
+        }
+        #sidebar {
+            width: 350px;
+            background: #f8f9fa;
+            padding: 20px;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            z-index: 1000;
+            overflow-y: auto;
+        }
+        #map {
+            flex-grow: 1;
+            height: 100%;
+        }
+        h2 { margin-top: 0; color: #333; }
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        label { font-weight: bold; font-size: 14px; color: #555; }
+        input {
+            padding: 8px;
+            font-size: 14px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        button {
+            padding: 10px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background: #0056b3; }
+        #results-table {
+            margin-top: 10px;
+            border-collapse: collapse;
+            width: 100%;
+            font-size: 14px;
+        }
+        #results-table td {
+            padding: 8px;
+            border-bottom: 1px solid #ddd;
+        }
+        #results-table td.label {
+            font-weight: bold;
+            color: #666;
+            width: 40%;
+        }
+        .error { color: red; font-weight: bold; }
+        .loading { color: #666; font-style: italic; }
+    </style>
+</head>
+<body>
+
+    <div id="sidebar">
+        <h2>Parcel Finder</h2>
+        <p style="font-size: 13px; color: #666; margin-top: -10px;">Enter coordinates to locate the property owner.</p>
+        
+        <div class="input-group">
+            <label for="lat">Latitude</label>
+            <input type="number" id="lat" step="any" placeholder="e.g., 48.1234">
+        </div>
+        
+        <div class="input-group">
+            <label for="lon">Longitude</label>
+            <input type="number" id="lon" step="any" placeholder="e.g., -97.5678">
+        </div>
+        
+        <button onclick="searchCoordinates()">Locate Parcel</button>
+        
+        <div id="status-message"></div>
+        
+        <table id="results-table" style="display: none;">
+            <tr><td class="label">Owner:</td><td id="res-owner">-</td></tr>
+            <tr><td class="label">County:</td><td id="res-county">-</td></tr>
+            <tr><td class="label">Parcel ID:</td><td id="res-id">-</td></tr>
+            <tr><td class="label">Section:</td><td id="res-section">-</td></tr>
+            <tr><td class="label">Township:</td><td id="res-township">-</td></tr>
+        </table>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Initialize the interactive map focused broadly over North Dakota
+        const map = L.map('map').setView([48.0, -97.5], 9);
+
+        // Load free OpenStreetMap satellite/street hybrid style tiles
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        let currentLayer = null; // Keeps track of the active highlighted parcel polygon
+
+        async function searchCoordinates() {
+            const lat = document.getElementById('lat').value;
+            const lon = document.getElementById('lon').value;
+            const statusMessage = document.getElementById('status-message');
+            const table = document.getElementById('results-table');
+            
+            if (!lat || !lon) {
+                statusMessage.innerHTML = '<span class="error">Please enter both Latitude and Longitude.</span>';
+                return;
+            }
+
+            statusMessage.innerHTML = '<span class="loading">Searching state registry...</span>';
+            table.style.style = 'none';
+            if (currentLayer) map.removeLayer(currentLayer);
+
+            // Structure the Esri Point geometry format
+            const pointGeometry = {
+                x: parseFloat(lon),
+                y: parseFloat(lat),
+                spatialReference: { wkid: 4326 }
+            };
+
+            const geomUrl = "https://services1.arcgis.com/GOcSXpzwBHyk2nog/arcgis/rest/services/NDGISHUB_Parcels/FeatureServer/0/query";
+            
+            // Build the URL parameters dynamically
+            const params = new URLSearchParams({
+                where: "1=1",
+                geometry: JSON.stringify(pointGeometry),
+                geometryType: "esriGeometryPoint",
+                spatialRel: "esriSpatialRelIntersects",
+                inSR: "4326",
+                outSR: "4326",
+                outFields: "*",
+                returnGeometry: "true",
+                f: "json"
+            });
+
+            try {
+                // 1. Fetch geometry and parcel metadata from Layer 0
+                const response = await fetch(`${geomUrl}?${params}`);
+                const data = await response.json();
+                
+                if (!data.features || data.features.length === 0) {
+                    statusMessage.innerHTML = '<span class="error">No parcel found at these coordinates.</span>';
+                    return;
+                }
+
+                const parcel = data.features[0];
+                const attrs = parcel.attributes;
+                const geometry = parcel.geometry;
+                const uniqueGisId = attrs.UniqueGISID;
+
+                statusMessage.innerHTML = '<span class="loading">Syncing unredacted owner...</span>';
+
+                // 2. Fetch the owner name matching the unique ID from Layer 1
+                let ownerName = "UNKNOWN";
+                if (uniqueGisId) {
+                    const tableUrl = "https://services1.arcgis.com/GOcSXpzwBHyk2nog/arcgis/rest/services/NDGISHUB_Parcels/FeatureServer/1/query";
+                    const tableParams = new URLSearchParams({
+                        where: `UniqueGISID = '${uniqueGisId.trim()}'`,
+                        outFields: "OwnerName",
+                        f: "json"
+                    });
+                    
+                    const tableResp = await fetch(`${tableUrl}?${tableParams}`);
+                    const tableData = await tableResp.json();
+                    if (tableData.features && tableData.features.length > 0) {
+                        ownerName = tableData.features[0].attributes.OwnerName || "UNKNOWN";
+                    }
+                }
+
+                // 3. Update the UI Table with findings
+                document.getElementById('res-owner').innerText = ownerName;
+                document.getElementById('res-county').innerText = attrs.CountyName || 'N/A';
+                document.getElementById('res-id').innerText = attrs.ParcelID || 'N/A';
+                document.getElementById('res-section').innerText = attrs.Section || 'N/A';
+                document.getElementById('res-township').innerText = attrs.TownshipName || 'N/A';
+                
+                statusMessage.innerHTML = '';
+                table.style.display = 'table';
+
+                // 4. Map rendering: Convert Esri Rings array structure to Leaflet Polygons
+                if (geometry && geometry.rings) {
+                    // Esri uses [longitude, latitude], Leaflet needs [latitude, longitude]
+                    const leafletCoords = geometry.rings.map(ring => 
+                        ring.map(coord => [coord[1], coord[0]])
+                    );
+
+                    // Draw the highlighted blue polygon onto the map interface
+                    currentLayer = L.polygon(leafletCoords, {
+                        color: 'blue',
+                        weight: 2,
+                        fillColor: '#007bff',
+                        fillOpacity: 0.4
+                    }).addTo(map);
+
+                    // Smoothly pan and snap zoom onto the target property bounds
+                    map.fitBounds(currentLayer.getBounds());
+                    
+                    // Bind a quick descriptive popup when clicked on the map
+                    currentLayer.bindPopup(`<b>Owner:</b> ${ownerName}<br><b>ID:</b> ${attrs.ParcelID}`).openPopup();
+                }
+
+            } catch (error) {
+                console.error(error);
+                statusMessage.innerHTML = '<span class="error">Failed to connect to ArcGIS Server.</span>';
+            }
+        }
+    </script>
+</body>
+</html>
