@@ -201,6 +201,24 @@
             maxZoom: 19,
             attribution: '© OpenStreetMap contributors'
         }).addTo(map);
+        
+        // --- NEW FEATURE: CLICK ON MAP TO SEARCH PARCEL ---
+        map.on('click', function(e) {
+            // 1. Force the input dropdown format back to Decimal Degrees (DD)
+            document.getElementById('format-select').value = 'dd';
+            toggleFormat(); // Ensures the DD input boxes are visible
+
+            // 2. Extract the coordinates from the click event
+            const clickedLat = e.latlng.lat;
+            const clickedLon = e.latlng.lng;
+
+            // 3. Inject the values straight into your sidebar input fields
+            document.getElementById('lat').value = clickedLat.toFixed(6);
+            document.getElementById('lon').value = clickedLon.toFixed(6);
+
+            // 4. Fire off your existing search function automatically!
+            searchCoordinates();
+        });
 
         let currentLayer = null;
         let flightPathLayer = null;
