@@ -14,7 +14,7 @@
             height: 100vh;
         }
         #sidebar {
-            width: 350px;
+            width: 360px;
             background: #f8f9fa;
             padding: 20px;
             box-shadow: 2px 0 5px rgba(0,0,0,0.1);
@@ -34,12 +34,20 @@
             flex-direction: column;
             gap: 5px;
         }
+        .dms-row {
+            display: flex;
+            gap: 5px;
+        }
+        .dms-row input {
+            width: 100%;
+        }
         label { font-weight: bold; font-size: 14px; color: #555; }
-        input {
+        input, select {
             padding: 8px;
             font-size: 14px;
             border: 1px solid #ccc;
             border-radius: 4px;
+            background: white;
         }
         button {
             padding: 10px;
@@ -75,16 +83,39 @@
 
     <div id="sidebar">
         <h2>Parcel Finder</h2>
-        <p style="font-size: 13px; color: #666; margin-top: -10px;">Enter coordinates to locate the property owner.</p>
         
         <div class="input-group">
-            <label for="lat">Latitude</label>
-            <input type="number" id="lat" step="any" placeholder="e.g., 48.1234">
+            <label for="format-select">Coordinate Format</label>
+            <select id="format-select" onchange="toggleFormat()">
+                <option value="dd">Decimal Degrees (DD)</option>
+                <option value="dms">Degrees, Minutes, Seconds (DMS)</option>
+            </select>
         </div>
-        
-        <div class="input-group">
-            <label for="lon">Longitude</label>
-            <input type="number" id="lon" step="any" placeholder="e.g., -97.5678">
+
+        <div id="dd-container">
+            <div class="input-group" style="margin-bottom: 10px;">
+                <label for="lat">Latitude</label>
+                <input type="number" id="lat" step="any" placeholder="e.g., 48.1234">
+            </div>
+            <div class="input-group">
+                <label for="lon">Longitude</label>
+                <input type="number" id="lon" step="any" placeholder="e.g., -97.5678">
+            </div>
+        </div>
+
+        <div id="dms-container" style="display: none;">
+            <label>Latitude (North)</label>
+            <div class="dms-row" style="margin-bottom: 10px;">
+                <input type="number" id="lat-deg" placeholder="Deg°">
+                <input type="number" id="lat-min" placeholder="Min'">
+                <input type="number" id="lat-sec" step="any" placeholder="Sec&quot;">
+            </div>
+            <label>Longitude (West)</label>
+            <div class="dms-row">
+                <input type="number" id="lon-deg" placeholder="Deg°">
+                <input type="number" id="lon-min" placeholder="Min'">
+                <input type="number" id="lon-sec" step="any" placeholder="Sec&quot;">
+            </div>
         </div>
         
         <button onclick="searchCoordinates()">Locate Parcel</button>
@@ -104,42 +135,77 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        // Initialize the interactive map focused broadly over North Dakota
         const map = L.map('map').setView([48.0, -97.5], 9);
 
-        // Load free OpenStreetMap satellite/street hybrid style tiles
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
             attribution: '© OpenStreetMap contributors'
         }).addTo(map);
 
-        let currentLayer = null; // Keeps track of the active highlighted parcel polygon
+        let currentLayer = null;
+
+        // Switches UI containers based on chosen coordinate format style
+        function toggleFormat() {
+            const format = document.getElementById('format-select').value;
+            if (format === 'dd') {
+                document.getElementById('dd-container').style.display = 'block';
+                document.getElementById('dms-container').style.display = 'none';
+            } else {
+                document.getElementById('dd-container').style.display = 'none';
+                document.getElementById('dms-container').style.display = 'block';
+            }
+        }
+
+        // Mathematical conversion logic: Converts DMS to true Decimal Degrees
+        function convertDMSToDD(degrees, minutes, seconds, isNegative = false) {
+            let dd = parseFloat(degrees) + (parseFloat(minutes) / 60) + (parseFloat(seconds) / 3600);
+            if (isNegative) {
+                dd = dd * -1;
+            }
+            return dd;
+        }
 
         async function searchCoordinates() {
-            const lat = document.getElementById('lat').value;
-            const lon = document.getElementById('lon').value;
+            const format = document.getElementById('format-select').value;
             const statusMessage = document.getElementById('status-message');
             const table = document.getElementById('results-table');
             
-            if (!lat || !lon) {
-                statusMessage.innerHTML = '<span class="error">Please enter both Latitude and Longitude.</span>';
-                return;
+            let lat, lon;
+
+            if (format === 'dd') {
+                lat = parseFloat(document.getElementById('lat').value);
+                lon = parseFloat(document.getElementById('lon').value);
+                if (isNaN(lat) || isNaN(lon)) {
+                    statusMessage.innerHTML = '<span class="error">Please enter valid coordinate fields.</span>';
+                    return;
+                }
+            } else {
+                // Pull values from DMS field layouts
+                const latDeg = document.getElementById('lat-deg').value;
+                const latMin = document.getElementById('lat-min').value;
+                const latSec = document.getElementById('lat-sec').value;
+                
+                const lonDeg = document.getElementById('lon-deg').value;
+                const lonMin = document.getElementById('lon-min').value;
+                const lonSec = document.getElementById('lon-sec').value;
+
+                if (!latDeg || !latMin || !latSec || !lonDeg || !lonMin || !lonSec) {
+                    statusMessage.innerHTML = '<span class="error">Please fill in all Degrees/Minutes/Seconds fields.</span>';
+                    return;
+                }
+
+                lat = convertDMSToDD(latDeg, latMin, latSec, false);
+                // North Dakota is in the Western Hemisphere, so force Longitude to negative degree limits
+                lon = convertDMSToDD(lonDeg, lonMin, lonSec, true);
             }
 
             statusMessage.innerHTML = '<span class="loading">Searching state registry...</span>';
-            table.style.style = 'none';
+            table.style.display = 'none';
             if (currentLayer) map.removeLayer(currentLayer);
 
-            // Structure the Esri Point geometry format
-            const pointGeometry = {
-                x: parseFloat(lon),
-                y: parseFloat(lat),
-                spatialReference: { wkid: 4326 }
-            };
-
+            const pointGeometry = { x: lon, y: lat, spatialReference: { wkid: 4326 } };
             const geomUrl = "https://services1.arcgis.com/GOcSXpzwBHyk2nog/arcgis/rest/services/NDGISHUB_Parcels/FeatureServer/0/query";
             
-            // Build the URL parameters dynamically
             const params = new URLSearchParams({
                 where: "1=1",
                 geometry: JSON.stringify(pointGeometry),
@@ -153,7 +219,6 @@
             });
 
             try {
-                // 1. Fetch geometry and parcel metadata from Layer 0
                 const response = await fetch(`${geomUrl}?${params}`);
                 const data = await response.json();
                 
@@ -169,7 +234,6 @@
 
                 statusMessage.innerHTML = '<span class="loading">Syncing unredacted owner...</span>';
 
-                // 2. Fetch the owner name matching the unique ID from Layer 1
                 let ownerName = "UNKNOWN";
                 if (uniqueGisId) {
                     const tableUrl = "https://services1.arcgis.com/GOcSXpzwBHyk2nog/arcgis/rest/services/NDGISHUB_Parcels/FeatureServer/1/query";
@@ -186,7 +250,6 @@
                     }
                 }
 
-                // 3. Update the UI Table with findings
                 document.getElementById('res-owner').innerText = ownerName;
                 document.getElementById('res-county').innerText = attrs.CountyName || 'N/A';
                 document.getElementById('res-id').innerText = attrs.ParcelID || 'N/A';
@@ -196,14 +259,11 @@
                 statusMessage.innerHTML = '';
                 table.style.display = 'table';
 
-                // 4. Map rendering: Convert Esri Rings array structure to Leaflet Polygons
                 if (geometry && geometry.rings) {
-                    // Esri uses [longitude, latitude], Leaflet needs [latitude, longitude]
                     const leafletCoords = geometry.rings.map(ring => 
                         ring.map(coord => [coord[1], coord[0]])
                     );
 
-                    // Draw the highlighted blue polygon onto the map interface
                     currentLayer = L.polygon(leafletCoords, {
                         color: 'blue',
                         weight: 2,
@@ -211,10 +271,7 @@
                         fillOpacity: 0.4
                     }).addTo(map);
 
-                    // Smoothly pan and snap zoom onto the target property bounds
                     map.fitBounds(currentLayer.getBounds());
-                    
-                    // Bind a quick descriptive popup when clicked on the map
                     currentLayer.bindPopup(`<b>Owner:</b> ${ownerName}<br><b>ID:</b> ${attrs.ParcelID}`).openPopup();
                 }
 
