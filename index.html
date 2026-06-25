@@ -428,9 +428,11 @@
                         fillColor: '#007bff',
                         fillOpacity: 0.4
                     }).addTo(map);
-
-                    map.fitBounds(currentLayer.getBounds());
-                    currentLayer.bindPopup(`<b>Owner:</b> ${ownerName}<br><b>ID:</b> ${attrs.ParcelID}`).openPopup();
+                    
+                    //Really intense zoom
+                    //map.fitBounds(currentLayer.getBounds());
+                    map.panTo([lat, lon]);
+                    currentLayer.bindPopup(`<b>Owner:</b> ${ownerName}<br><b>ID:</b> ${backupParcelId}`).openPopup(); 
                 }
 
             } catch (error) {
