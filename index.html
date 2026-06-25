@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Flight Path Parcel Locator</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mapbox/togeojson@0.16.0/togeojson.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+    
     <style>
         body {
             margin: 0;
@@ -12,9 +18,12 @@
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             display: flex;
             height: 100vh;
+            overflow: hidden;
         }
         #sidebar {
             width: 360px;
+            min-width: 360px;
+            box-sizing: border-box;
             background: #f8f9fa;
             padding: 20px;
             box-shadow: 2px 0 5px rgba(0,0,0,0.1);
@@ -23,12 +32,41 @@
             gap: 15px;
             z-index: 1000;
             overflow-y: auto;
+            transition: margin-left 0.3s ease;
+        }
+        #sidebar.hidden {
+            margin-left: -400px; 
+        }
+        #toggle-tab {
+            position: absolute;
+            left: 360px;
+            top: 20px;
+            z-index: 1100;
+            background: #ffffff;
+            border: 1px solid #ccc;
+            border-left: none;
+            border-radius: 0 4px 4px 0;
+            padding: 10px 8px;
+            cursor: pointer;
+            box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+            font-weight: bold;
+            font-size: 14px;
+            color: #333;
+            user-select: none;
+            transition: left 0.3s ease;
+        }
+        #toggle-tab.sidebar-hidden {
+            left: 0px;
+            border-left: 1px solid #ccc;
+            border-radius: 4px;
         }
         #map {
             flex-grow: 1;
             height: 100%;
+            position: relative;
         }
-        h2 { margin-top: 0; color: #333; }
+        h2, h3 { margin-top: 0; color: #333; }
+        h3 { margin-bottom: 5px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
         .input-group {
             display: flex;
             flex-direction: column;
@@ -60,6 +98,10 @@
             font-weight: bold;
         }
         button:hover { background: #0056b3; }
+        button.secondary {
+            background: #28a745;
+        }
+        button.secondary:hover { background: #218838; }
         #results-table {
             margin-top: 10px;
             border-collapse: collapse;
@@ -77,15 +119,32 @@
         }
         .error { color: red; font-weight: bold; }
         .loading { color: #666; font-style: italic; }
+        .success { color: green; font-weight: bold; }
+        hr { border: 0; border-top: 1px solid #ddd; margin: 5px 0; }
     </style>
 </head>
 <body>
 
     <div id="sidebar">
-        <h2>Parcel Finder</h2>
+        <h2>Parcel Toolkit</h2>
         
+        <h3>Flight Path Overlay</h3>
         <div class="input-group">
-            <label for="format-select">Coordinate Format</label>
+            <label for="kmz-file">Upload Flight Log (.kml, .kmz)</label>
+            <input type="file" id="kmz-file" accept=".kml,.kmz">
+        </div>
+        <div class="input-group">
+            <label for="buffer-radius">Buffer Radius (Meters)</label>
+            <input type="number" id="buffer-radius" value="150" min="0">
+        </div>
+        <button class="secondary" onclick="loadFlightPath()">Plot Corridor</button>
+        <div id="flight-status"></div>
+
+        <hr>
+
+        <h3>Coordinate Lookup</h3>
+        <div class="input-group">
+            <label for="format-select">Format</label>
             <select id="format-select" onchange="toggleFormat()">
                 <option value="dd">Decimal Degrees (DD)</option>
                 <option value="dms">Degrees, Minutes, Seconds (DMS)</option>
@@ -131,9 +190,10 @@
         </table>
     </div>
 
-    <div id="map"></div>
+    <div id="map">
+        <div id="toggle-tab" onclick="toggleSidebar()">◀</div>
+    </div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
         const map = L.map('map').setView([48.0, -97.5], 9);
 
@@ -143,33 +203,105 @@
         }).addTo(map);
 
         let currentLayer = null;
+        let flightPathLayer = null;
+        let bufferLayer = null;
 
-        // Switches UI containers based on chosen coordinate format style
-        function toggleFormat() {
-            const format = document.getElementById('format-select').value;
-            if (format === 'dd') {
-                document.getElementById('dd-container').style.display = 'block';
-                document.getElementById('dms-container').style.display = 'none';
-            } else {
-                document.getElementById('dd-container').style.display = 'none';
-                document.getElementById('dms-container').style.display = 'block';
-            }
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            const tab = document.getElementById('toggle-tab');
+            sidebar.classList.toggle('hidden');
+            tab.classList.toggle('sidebar-hidden');
+            tab.innerText = sidebar.classList.contains('hidden') ? '▶' : '◀';
+            setTimeout(() => { map.invalidateSize(); }, 300);
         }
 
-        // Mathematical conversion logic: Converts DMS to true Decimal Degrees
+        function toggleFormat() {
+            const format = document.getElementById('format-select').value;
+            document.getElementById('dd-container').style.display = format === 'dd' ? 'block' : 'none';
+            document.getElementById('dms-container').style.display = format === 'dms' ? 'block' : 'none';
+        }
+
         function convertDMSToDD(degrees, minutes, seconds, isNegative = false) {
             let dd = parseFloat(degrees) + (parseFloat(minutes) / 60) + (parseFloat(seconds) / 3600);
-            if (isNegative) {
-                dd = dd * -1;
-            }
+            if (isNegative) dd = dd * -1;
             return dd;
         }
 
+        // --- NEW FEATURE: KMZ/KML PARSER AND RADIUS BUFFER PATTERNS ---
+        async function loadFlightPath() {
+            const fileInput = document.getElementById('kmz-file');
+            const bufferInput = document.getElementById('buffer-radius');
+            const status = document.getElementById('flight-status');
+            
+            if (!fileInput.files || fileInput.files.length === 0) {
+                status.innerHTML = '<span class="error">Select a file first.</span>';
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            const bufferMeters = parseFloat(bufferInput.value) || 0;
+            status.innerHTML = '<span class="loading">Parsing tracks...</span>';
+
+            // Clear any old tracks
+            if (flightPathLayer) map.removeLayer(flightPathLayer);
+            if (bufferLayer) map.removeLayer(bufferLayer);
+
+            try {
+                let kmlText = "";
+
+                if (file.name.endsWith('.kmz')) {
+                    // Extract internal KML file from compiled zip payload
+                    const zip = await JSZip.loadAsync(file);
+                    const kmlFile = Object.keys(zip.files).find(name => name.endsWith('.kml'));
+                    if (!kmlFile) throw new Error("No KML file found inside KMZ package.");
+                    kmlText = await zip.files[kmlFile].async("string");
+                } else {
+                    // Raw KML text
+                    kmlText = await file.text();
+                }
+
+                // Convert KML raw XML document trees into browser standard GeoJSON strings
+                const parser = new DOMParser();
+                const kmlDom = parser.parseFromString(kmlText, "text/xml");
+                const geoJson = toGeoJSON.kml(kmlDom);
+
+                if (!geoJson.features || geoJson.features.length === 0) {
+                    throw new Error("No flight track lines or coordinates detected.");
+                }
+
+                // Render the flight line directly onto map
+                flightPathLayer = L.geoJSON(geoJson, {
+                    style: { color: '#ffc107', weight: 4, opacity: 0.8 }
+                }).addTo(map);
+
+                // If a buffer distance is set, calculate the safety corridor boundary polygon
+                if (bufferMeters > 0) {
+                    // Turf processes calculations using kilometers
+                    const bufferKm = bufferMeters / 1000;
+                    const bufferedGeoJson = turf.buffer(geoJson, bufferKm, { units: 'kilometers' });
+
+                    bufferLayer = L.geoJSON(bufferedGeoJson, {
+                        style: { color: '#dc3545', weight: 1, fillColor: '#dc3545', fillOpacity: 0.2 }
+                    }).addTo(map);
+                    
+                    map.fitBounds(bufferLayer.getBounds());
+                } else {
+                    map.fitBounds(flightPathLayer.getBounds());
+                }
+
+                status.innerHTML = '<span class="success">Flight corridor overlay complete!</span>';
+
+            } catch (err) {
+                console.error(err);
+                status.innerHTML = `<span class="error">Error: ${err.message}</span>`;
+            }
+        }
+
+        // --- COORDINATE PARCEL DATABASE LOOKUPS ---
         async function searchCoordinates() {
             const format = document.getElementById('format-select').value;
             const statusMessage = document.getElementById('status-message');
             const table = document.getElementById('results-table');
-            
             let lat, lon;
 
             if (format === 'dd') {
@@ -180,22 +312,19 @@
                     return;
                 }
             } else {
-                // Pull values from DMS field layouts
                 const latDeg = document.getElementById('lat-deg').value;
                 const latMin = document.getElementById('lat-min').value;
                 const latSec = document.getElementById('lat-sec').value;
-                
                 const lonDeg = document.getElementById('lon-deg').value;
                 const lonMin = document.getElementById('lon-min').value;
                 const lonSec = document.getElementById('lon-sec').value;
 
                 if (!latDeg || !latMin || !latSec || !lonDeg || !lonMin || !lonSec) {
-                    statusMessage.innerHTML = '<span class="error">Please fill in all Degrees/Minutes/Seconds fields.</span>';
+                    statusMessage.innerHTML = '<span class="error">Please fill in all DMS fields.</span>';
                     return;
                 }
 
                 lat = convertDMSToDD(latDeg, latMin, latSec, false);
-                // North Dakota is in the Western Hemisphere, so force Longitude to negative degree limits
                 lon = convertDMSToDD(lonDeg, lonMin, lonSec, true);
             }
 
@@ -234,28 +363,39 @@
 
                 statusMessage.innerHTML = '<span class="loading">Syncing unredacted owner...</span>';
 
+                // 2. Fetch the owner name AND missing ParcelID matching the unique ID from Layer 1
                 let ownerName = "UNKNOWN";
+                let backupParcelId = attrs.ParcelID || "";
+
                 if (uniqueGisId) {
                     const tableUrl = "https://services1.arcgis.com/GOcSXpzwBHyk2nog/arcgis/rest/services/NDGISHUB_Parcels/FeatureServer/1/query";
                     const tableParams = new URLSearchParams({
                         where: `UniqueGISID = '${uniqueGisId.trim()}'`,
-                        outFields: "OwnerName",
+                        outFields: "OwnerName,ParcelID", // 🌟 Added ParcelID to the requested fields
                         f: "json"
                     });
                     
                     const tableResp = await fetch(`${tableUrl}?${tableParams}`);
                     const tableData = await tableResp.json();
                     if (tableData.features && tableData.features.length > 0) {
-                        ownerName = tableData.features[0].attributes.OwnerName || "UNKNOWN";
+                        const tableAttrs = tableData.features[0].attributes;
+                        ownerName = tableAttrs.OwnerName || "UNKNOWN";
+                        
+                        // If Layer 0 was missing the Parcel ID, fall back to the Layer 1 registry value
+                        if (!backupParcelId && tableAttrs.ParcelID) {
+                            backupParcelId = tableAttrs.ParcelID;
+                        }
                     }
                 }
 
+                // 3. Update the UI Table with findings
                 document.getElementById('res-owner').innerText = ownerName;
                 document.getElementById('res-county').innerText = attrs.CountyName || 'N/A';
-                document.getElementById('res-id').innerText = attrs.ParcelID || 'N/A';
+                document.getElementById('res-id').innerText = backupParcelId || 'N/A'; // 🌟 Uses the patched ID
                 document.getElementById('res-section').innerText = attrs.Section || 'N/A';
                 document.getElementById('res-township').innerText = attrs.TownshipName || 'N/A';
-                
+
+
                 statusMessage.innerHTML = '';
                 table.style.display = 'table';
 
